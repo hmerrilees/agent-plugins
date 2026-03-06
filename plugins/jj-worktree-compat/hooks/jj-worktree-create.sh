@@ -22,10 +22,9 @@ mkdir -p "$worktree_base"
 # `jj workspace add` takes an internal repo lock, but concurrent callers
 # can fail rather than queue — and a failed hook causes Claude Code to
 # fall back to the caller's cwd, landing multiple agents in the same
-# directory. An exclusive flock around the entire create-or-diagnose
-# sequence ensures only one hook mutates jj state at a time.
-lockfile="$worktree_base/.jj-workspace-create.lock"
-exec 9>"$lockfile"
+# directory. An exclusive flock on the worktree base directory ensures
+# only one hook mutates jj state at a time.
+exec 9<"$worktree_base"
 flock -x 9
 
 # Let `jj workspace add` be the atomic arbiter — it will reject duplicate

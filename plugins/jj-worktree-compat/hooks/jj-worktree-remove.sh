@@ -12,9 +12,8 @@ name=$(basename "$worktree_path")
 # Serialize against the same lock used by WorktreeCreate to avoid
 # racing a create with a concurrent remove on jj repo state.
 worktree_base="$HOME/.claude/worktrees"
-lockfile="$worktree_base/.jj-workspace-create.lock"
 mkdir -p "$worktree_base"
-exec 9>"$lockfile"
+exec 9<"$worktree_base"
 flock -x 9
 
 # Forget the workspace from within it (jj allows self-forget).
