@@ -1,6 +1,6 @@
 {
   "name": "jj-worktree-compat",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "jj workspace isolation hooks for Claude Code (WorktreeCreate/Remove via jj workspaces)",
   "author": { "name": "henry-merrilees" }
 }
