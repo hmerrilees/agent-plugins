@@ -92,7 +92,9 @@ user or system. The "how" goes in the body.
 should be able to stop at any depth and have gotten maximum value.
 
 When a body warrants headings, use this canonical vocabulary so that
-readers — human and automated — can navigate predictably:
+readers — human and automated — can navigate predictably. Format
+headings as `## Heading` (Markdown ATX-style), never with underlines
+or **bold** text as a heading substitute.
 
 | Heading | Use when... |
 |---|---|
