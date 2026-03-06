@@ -34,6 +34,11 @@ const MAX_EVOLOG_ENTRIES: usize = 200;
 /// Maximum retries before the stop hook gives up (prevents infinite loops).
 const MAX_STOP_RETRIES: u32 = 3;
 
+/// Per-change staleness message length (in bytes) above which the full detail
+/// is spilled to a temp file and only the path is printed inline — analogous to
+/// how rustc spills very long diagnostics.
+const STALENESS_SPILL_THRESHOLD: usize = 512;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StalenessInfo {
     change_id_short: String,
@@ -349,30 +354,80 @@ fn emit_output(stale: &[StalenessInfo], stop_mode: bool) -> Result<()> {
     }
 }
 
-/// Builds a human-readable staleness summary including changed file paths.
-fn format_staleness_message(stale: &[StalenessInfo]) -> String {
+/// Formats the staleness detail for a single change.
+fn format_single_staleness(info: &StalenessInfo) -> String {
     use std::fmt::Write as _;
 
+    let mut msg = format!(
+        "Stale description: change {} modified since last described.",
+        info.change_id_short
+    );
+    if !info.changed_files.is_empty() {
+        let files: Vec<_> = info
+            .changed_files
+            .iter()
+            .map(|f| f.as_internal_file_string().to_owned())
+            .collect();
+        let _ = write!(msg, "\n  Changed: {}", files.join(", "));
+    }
+    msg
+}
+
+/// Builds a human-readable staleness summary including changed file paths.
+///
+/// When a single change's message exceeds [`STALENESS_SPILL_THRESHOLD`], the
+/// full detail is written to a temp file and only the path is printed inline.
+fn format_staleness_message(stale: &[StalenessInfo]) -> String {
     let mut msg = String::new();
     for (i, info) in stale.iter().enumerate() {
         if i > 0 {
             msg.push('\n');
         }
-        let _ = write!(
-            msg,
-            "Stale description: change {} modified since last described.",
-            info.change_id_short
-        );
-        if !info.changed_files.is_empty() {
-            let files: Vec<_> = info
-                .changed_files
-                .iter()
-                .map(|f| f.as_internal_file_string().to_owned())
-                .collect();
-            let _ = write!(msg, "\n  Changed: {}", files.join(", "));
+
+        let detail = format_single_staleness(info);
+
+        if detail.len() > STALENESS_SPILL_THRESHOLD {
+            match spill_to_tempfile(&info.change_id_short, &detail) {
+                Ok(path) => {
+                    msg.push_str(&format!(
+                        "Stale description: change {} modified since last described \
+                         (full detail: {})",
+                        info.change_id_short,
+                        path.display(),
+                    ));
+                }
+                Err(_) => {
+                    // Spill failed — fall back to inline.
+                    msg.push_str(&detail);
+                }
+            }
+        } else {
+            msg.push_str(&detail);
         }
     }
     msg
+}
+
+/// Writes the full staleness detail for a change to a persistent temp file.
+fn spill_to_tempfile(change_id_short: &str, detail: &str) -> Result<PathBuf> {
+    let file = tempfile::Builder::new()
+        .prefix(&format!("stale-desc-{change_id_short}-"))
+        .suffix(".txt")
+        .tempfile()
+        .context("failed to create staleness detail tempfile")?;
+
+    let (_persisted, path) = file
+        .keep()
+        .map_err(|e| anyhow::anyhow!("failed to persist tempfile: {e}"))?;
+
+    fs::write(&path, detail).with_context(|| {
+        format!(
+            "failed to write staleness detail to {}",
+            path.display()
+        )
+    })?;
+
+    Ok(path)
 }
 
 /// Advisory mode: JSON on stdout for Claude Code PostToolUse hook.
