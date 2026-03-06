@@ -15,17 +15,37 @@ repo_root=$(cd "$cwd" && jj root)
 # Place workspaces under ~/.claude/worktrees/{name}
 dest="$HOME/.claude/worktrees/$name"
 
-# Clean up stale workspace at this path if it exists
-if [ -d "$dest" ]; then
-  (cd "$repo_root" && jj workspace forget "$name" 2>/dev/null) || true
-  rm -rf "$dest"
-fi
-
 mkdir -p "$(dirname "$dest")"
 
-# Create the workspace. New working-copy commit shares the same parents
-# as the main workspace's @, so the agent starts with identical code.
-(cd "$repo_root" && jj workspace add "$dest" --name "$name") >&2
+# Let `jj workspace add` be the atomic arbiter — it will reject duplicate
+# workspace names and fail if the destination directory already exists.
+if add_err=$( (cd "$repo_root" && jj workspace add "$dest" --name "$name") 2>&1 ); then
+  echo "$dest"
+  exit 0
+fi
 
-# Stdout = absolute path (the hook contract)
-echo "$dest"
+# Creation failed — diagnose whether this is a live workspace or a stale leftover.
+workspace_tracked=false
+if (cd "$repo_root" && jj workspace list 2>/dev/null) | grep -q "^${name}: "; then
+  workspace_tracked=true
+fi
+
+# jj still tracks the workspace — it's occupied. Refuse to clobber.
+if [ "$workspace_tracked" = true ]; then
+  echo "error: workspace '$name' is already active — refusing to clobber" >&2
+  exit 1
+fi
+
+# Directory exists but jj doesn't track the workspace — stale leftover.
+# Safe to remove the directory and retry.
+if [ -d "$dest" ]; then
+  rm -rf "$dest"
+  (cd "$repo_root" && jj workspace add "$dest" --name "$name") >&2
+  echo "$dest"
+  exit 0
+fi
+
+# Unknown failure — surface the original error.
+echo "error: failed to create workspace '$name'" >&2
+echo "$add_err" >&2
+exit 1
