@@ -12,8 +12,9 @@ cwd=$(echo "$input" | jq -r '.cwd')
 # Find the jj repo root from the session's cwd
 repo_root=$(cd "$cwd" && jj root)
 
-# Place workspaces under ~/.claude/worktrees/{name}
-worktree_base="$HOME/.claude/worktrees"
+# Place workspaces under <repo>/.claude/worktrees/{name}, matching Claude Code's
+# default git worktree convention and naturally namespacing per-repo.
+worktree_base="$repo_root/.claude/worktrees"
 dest="$worktree_base/$name"
 
 mkdir -p "$worktree_base"
@@ -29,7 +30,7 @@ flock -x 9
 
 # Let `jj workspace add` be the atomic arbiter — it will reject duplicate
 # workspace names and fail if the destination directory already exists.
-if add_err=$( (cd "$repo_root" && jj workspace add "$dest" --name "$name") 2>&1 ); then
+if add_err=$( (cd "$repo_root" && jj workspace add "$dest" --name "$name" -r @) 2>&1 ); then
   echo "$dest"
   exit 0
 fi
@@ -50,7 +51,7 @@ fi
 # Safe to remove the directory and retry.
 if [ -d "$dest" ]; then
   rm -rf "$dest"
-  (cd "$repo_root" && jj workspace add "$dest" --name "$name") >&2
+  (cd "$repo_root" && jj workspace add "$dest" --name "$name" -r @) >&2
   echo "$dest"
   exit 0
 fi

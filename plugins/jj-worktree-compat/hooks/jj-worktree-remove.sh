@@ -11,8 +11,7 @@ name=$(basename "$worktree_path")
 
 # Serialize against the same lock used by WorktreeCreate to avoid
 # racing a create with a concurrent remove on jj repo state.
-worktree_base="$HOME/.claude/worktrees"
-mkdir -p "$worktree_base"
+worktree_base=$(dirname "$worktree_path")
 exec 9<"$worktree_base"
 flock -x 9
 
