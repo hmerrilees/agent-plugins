@@ -1,12 +1,13 @@
-//! Detect stale jj change descriptions for Claude Code hooks.
+//! Pure staleness reporter for jj change descriptions.
 //!
-//! A description is "stale" when a change's content (diff from parent) has been
-//! modified since its description was last updated. Runs as a Claude Code
-//! PostToolUse (advisory) or Stop (blocking) hook.
+//! Takes a revset as its sole argument, evaluates it via `jj log`, then uses
+//! jj-lib for in-memory evolog walks and tree diffs. Prints a plain-text
+//! staleness report to stdout if any changes have stale descriptions.
 //!
-//! Uses a single `jj log` subprocess for revset evaluation, then jj-lib for
-//! in-memory evolog walks and tree diffs — reducing overhead from O(N)
-//! subprocess calls to 1.
+//! Exit codes:
+//! - 0: success (stdout may contain a report, or be empty if all clean)
+//! - 1: revset evaluation failed (`jj log` errored)
+//! - Other non-zero: unexpected error (fail-open from `main()`)
 
 use std::collections::BTreeMap;
 use std::env;
@@ -30,9 +31,6 @@ use pollster::FutureExt as _;
 
 /// Maximum evolog entries to inspect per change (sanity bound).
 const MAX_EVOLOG_ENTRIES: usize = 200;
-
-/// Maximum retries before the stop hook gives up (prevents infinite loops).
-const MAX_STOP_RETRIES: u32 = 3;
 
 /// Per-change staleness message length (in bytes) above which the full detail
 /// is spilled to a temp file and only the path is printed inline — analogous to
@@ -60,11 +58,23 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let stop_mode = env::args().nth(1).is_some_and(|a| a == "--stop");
+    let revset = env::args()
+        .nth(1)
+        .context("usage: jj-stale-descriptions <revset>")?;
 
     // Gather candidate commit IDs via subprocess (evaluates revset with full
     // CLI context, triggers working-copy snapshot).
-    let candidate_hex = gather_candidates();
+    let candidate_hex = gather_candidates(&revset).map_err(|e| {
+        // Exit 1 signals revset failure to the shell wrapper.
+        if env::var_os("ACTIVE_DESCRIPTIONS_DEBUG").is_some() {
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!("active-descriptions: {e:#}");
+            }
+        }
+        std::process::exit(1);
+    })?;
+
     if candidate_hex.is_empty() {
         return Ok(());
     }
@@ -84,49 +94,40 @@ fn run() -> Result<()> {
 
     stale.dedup_by(|a, b| a.change_id_short == b.change_id_short);
 
-    if stale.is_empty() {
-        // Descriptions are up to date — reset retry counter so the stop hook
-        // can re-arm if descriptions become stale later in the session.
-        if stop_mode {
-            reset_stop_retries();
+    if !stale.is_empty() {
+        let msg = format_staleness_message(&stale);
+        #[allow(clippy::print_stdout)]
+        {
+            print!("{msg}");
         }
-        return Ok(());
     }
 
-    emit_output(&stale, stop_mode)
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
 // Subprocess: gather candidate commit IDs
 // ---------------------------------------------------------------------------
 
-/// Runs `jj log` to evaluate `trunk()..@ ~ empty()` and return full hex
-/// commit IDs. Returns an empty vec on any failure (not a jj repo, etc.).
-fn gather_candidates() -> Vec<String> {
+/// Runs `jj log` to evaluate the given revset and return full hex commit IDs.
+fn gather_candidates(revset: &str) -> Result<Vec<String>> {
     let output = Command::new("jj")
-        .args([
-            "log",
-            "-r",
-            "trunk()..@ ~ empty()",
-            "--no-graph",
-            "-T",
-            r#"commit_id ++ "\n""#,
-        ])
+        .args(["log", "-r", revset, "--no-graph", "-T", r#"commit_id ++ "\n""#])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .output();
+        .output()
+        .context("failed to run `jj log`")?;
 
-    let output = match output {
-        Ok(o) if o.status.success() => o,
-        _ => return Vec::new(),
-    };
+    if !output.status.success() {
+        bail!("jj log failed for revset: {revset}");
+    }
 
-    String::from_utf8_lossy(&output.stdout)
+    Ok(String::from_utf8_lossy(&output.stdout)
         .lines()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(String::from)
-        .collect()
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -335,25 +336,6 @@ fn diff_fingerprint_changes(
 // Output
 // ---------------------------------------------------------------------------
 
-/// Emits output appropriate for the hook mode.
-///
-/// - **Stop mode**: stderr + exit 2 to block session exit.
-/// - **Advisory**: JSON on stdout for Claude Code hook protocol.
-fn emit_output(stale: &[StalenessInfo], stop_mode: bool) -> Result<()> {
-    let msg = format_staleness_message(stale);
-
-    if stop_mode {
-        emit_stop(&format!(
-            "{msg}\n\n\
-             You MUST update all stale descriptions before stopping. \
-             Ensure the active-descriptions:describe skill is loaded, \
-             then follow it for each stale change."
-        ))
-    } else {
-        emit_advisory(&msg)
-    }
-}
-
 /// Formats the staleness detail for a single change.
 fn format_single_staleness(info: &StalenessInfo) -> String {
     use std::fmt::Write as _;
@@ -428,57 +410,6 @@ fn spill_to_tempfile(change_id_short: &str, detail: &str) -> Result<PathBuf> {
     })?;
 
     Ok(path)
-}
-
-/// Advisory mode: JSON on stdout for Claude Code PostToolUse hook.
-fn emit_advisory(msg: &str) -> Result<()> {
-    let output = serde_json::json!({
-        "hookSpecificOutput": {
-            "additionalContext": msg
-        }
-    });
-    #[allow(clippy::print_stdout)]
-    {
-        println!("{output}");
-    }
-    Ok(())
-}
-
-/// Removes the session-scoped retry file so the stop hook can re-arm.
-/// Called when descriptions are found to be up-to-date.
-fn reset_stop_retries() {
-    let session_id = env::var("CLAUDE_SESSION_ID").unwrap_or_else(|_| "unknown".into());
-    let retry_file = env::temp_dir().join(format!("claude-stale-desc-retries-{session_id}"));
-    let _ = fs::remove_file(&retry_file);
-}
-
-/// Stop mode: message on stderr, exit 2. Includes retry cap to prevent
-/// infinite loops when Claude can't/won't fix the descriptions.
-///
-/// The retry counter resets per prompt via a `UserPromptSubmit` hook, so each
-/// user prompt gets a fresh budget of [`MAX_STOP_RETRIES`] attempts.
-fn emit_stop(msg: &str) -> Result<()> {
-    let session_id = env::var("CLAUDE_SESSION_ID").unwrap_or_else(|_| "unknown".into());
-    let retry_file = env::temp_dir().join(format!("claude-stale-desc-retries-{session_id}"));
-
-    let retries: u32 = fs::read_to_string(&retry_file)
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(0);
-
-    if retries >= MAX_STOP_RETRIES {
-        return Ok(());
-    }
-
-    fs::write(&retry_file, (retries + 1).to_string())
-        .with_context(|| format!("failed to write retry file: {}", retry_file.display()))?;
-
-    #[allow(clippy::print_stderr)]
-    {
-        eprintln!("{msg}");
-    }
-
-    std::process::exit(2);
 }
 
 #[cfg(test)]

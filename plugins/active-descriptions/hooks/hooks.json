@@ -14,29 +14,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "rm -f \"${TMPDIR:-/tmp}/claude-stale-desc-retries-${CLAUDE_SESSION_ID}\"",
-            "timeout": 5
-          }
-        ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "command",
             "command": "cargo build -r --manifest-path ${CLAUDE_PLUGIN_ROOT}/Cargo.toml 2>/dev/null",
             "timeout": 300,
             "async": true
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "rm -f \"${TMPDIR:-/tmp}/claude-stale-desc-retries-${CLAUDE_SESSION_ID}\"",
-            "timeout": 5
           }
         ]
       }
@@ -58,7 +38,18 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cargo run -r --manifest-path ${CLAUDE_PLUGIN_ROOT}/Cargo.toml -- --stop",
+            "command": "msg=$(cargo run -r --manifest-path ${CLAUDE_PLUGIN_ROOT}/Cargo.toml -- 'trunk()..@ ~ empty()' 2>/dev/null) && [ -n \"$msg\" ] && echo \"$msg\" >&2 && exit 2",
+            "timeout": 300
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "msg=$(cargo run -r --manifest-path ${CLAUDE_PLUGIN_ROOT}/Cargo.toml -- 'default@..@ ~ empty()' 2>/dev/null); rc=$?; if [ -n \"$msg\" ]; then echo \"$msg\" >&2; exit 2; elif [ \"$rc\" -ne 0 ]; then printf '{\"hookSpecificOutput\":{\"additionalContext\":\"active-descriptions: SubagentStop staleness check skipped — could not resolve default@. The hook requires the main workspace to be named default.\"}}'; fi",
             "timeout": 300
           }
         ]
