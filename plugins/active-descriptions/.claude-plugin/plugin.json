@@ -1,6 +1,6 @@
 {
   "name": "active-descriptions",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Collaborative jj change description workflow with staleness enforcement",
   "author": { "name": "henry-merrilees" }
 }
